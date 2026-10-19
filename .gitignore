@@ -1,0 +1,31 @@
+# Environment secrets
+.env
+.env.*
+!.env.example
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local database and backups
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
+*.db-journal
+
+# Frontend dependencies and builds
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
