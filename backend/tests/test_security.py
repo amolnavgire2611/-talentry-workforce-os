@@ -1,7 +1,7 @@
 from jose import jwt
 
 from config import settings
-from security import ALGORITHM, create_access_token, verify_access_token
+from security import ALGORITHM, create_access_token, verify_access_token, validate_password_complexity
 
 
 TEST_SECRET = "issuer-audience-test-secret-with-enough-entropy"
@@ -28,3 +28,46 @@ def test_access_tokens_require_the_configured_issuer_and_audience():
 
     assert settings.token_issuer
     assert settings.token_audience
+
+
+def test_password_complexity_rejects_short_passwords():
+    try:
+        validate_password_complexity("Ab1!")
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "at least" in str(e)
+
+
+def test_password_complexity_accepts_min_length_passwords():
+    validate_password_complexity("password123!")
+    validate_password_complexity("Ab1!xy12")
+    validate_password_complexity("Str0ng!Pass")
+
+
+def test_rate_limiting_blocks_excessive_registration_attempts(client):
+    """Too many registration attempts from the same IP should be rate limited."""
+    for i in range(20):
+        response = client.post("/api/auth/register", json={
+            "name": f"User {i}",
+            "email": f"user{i}@example.com",
+            "password": "Strong!Pass123",
+        })
+        if response.status_code == 429:
+            break
+    else:
+        assert False, "Expected rate limiting after 20 registration attempts"
+    # Verify the rate limited response
+    assert response.status_code == 429
+
+
+def test_rate_limiting_blocks_excessive_password_reset_attempts(client):
+    """Too many password reset attempts from the same IP should be rate limited."""
+    for i in range(5):
+        response = client.post("/api/auth/password/forgot", json={
+            "email": f"user{i}@example.com",
+        })
+        if response.status_code == 429:
+            break
+    else:
+        assert False, "Expected rate limiting after 5 password reset attempts"
+    assert response.status_code == 429

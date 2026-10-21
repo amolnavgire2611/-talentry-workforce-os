@@ -71,11 +71,13 @@ class PasswordChangeRequest(StrictRequest):
 
 class AuthResponse(BaseModel):
     message: str
-    access_token: str
+    access_token: str = ""
     token_type: Literal["bearer"] = "bearer"
-    expires_in: int
-    csrf_token: str
-    user: UserResponse
+    expires_in: int = 0
+    csrf_token: str = ""
+    user: UserResponse | None = None
+    mfa_required: bool = False
+    mfa_session_id: str | None = None
 
 
 class RefreshSessionResponse(BaseModel):
@@ -525,6 +527,7 @@ class MFAEnrollmentRequest(StrictRequest):
 
 class MFAVerifyRequest(StrictRequest):
     code: str = Field(min_length=6, max_length=8)
+    mfa_session_id: str | None = Field(default=None, max_length=128)
 
 
 class MFAFactorResponse(BaseModel):

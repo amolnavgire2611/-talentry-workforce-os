@@ -1,4 +1,5 @@
 
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pwdlib import PasswordHash
@@ -7,6 +8,9 @@ from jose import jwt, JWTError
 from config import settings
 
 password_hash = PasswordHash.recommended()
+
+# Deferred import to avoid circular imports; models imports database/config only.
+import models  # noqa: E402
 
 
 def hash_password(password: str) -> str:
@@ -21,6 +25,35 @@ def verify_password(
         plain_password,
         hashed_password,
     )
+
+
+def validate_password_complexity(password: str) -> None:
+    """Enforce configurable password complexity policy. Raises ValueError with details."""
+    errors = []
+    if len(password) < settings.password_min_length:
+        errors.append(f"at least {settings.password_min_length} characters")
+    if settings.password_require_uppercase and not re.search(r"[A-Z]", password):
+        errors.append("one uppercase letter")
+    if settings.password_require_lowercase and not re.search(r"[a-z]", password):
+        errors.append("one lowercase letter")
+    if settings.password_require_digit and not re.search(r"[0-9]", password):
+        errors.append("one digit")
+    if settings.password_require_symbol and not re.search(r"[^A-Za-z0-9]", password):
+        errors.append("one symbol")
+    if errors:
+        raise ValueError("Password must contain " + ", ".join(errors))
+
+
+def check_password_history(db, user_id: int, new_password: str) -> None:
+    """Reject the new password if it matches any of the last N password hashes for the user."""
+    if settings.password_history_count <= 0:
+        return
+    recent = db.query(models.PasswordHistory).filter_by(user_id=user_id).order_by(
+        models.PasswordHistory.created_at.desc(),
+    ).limit(settings.password_history_count).all()
+    for entry in recent:
+        if verify_password(new_password, entry.hashed_password):
+            raise ValueError("Password cannot be one of your previous passwords.")
 
 
 ALGORITHM = "HS256"

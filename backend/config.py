@@ -27,6 +27,12 @@ class Settings:
     secure_cookies: bool
     token_issuer: str
     token_audience: str
+    password_min_length: int
+    password_require_uppercase: bool
+    password_require_lowercase: bool
+    password_require_digit: bool
+    password_require_symbol: bool
+    password_history_count: int
 
 
 settings = Settings(
@@ -43,6 +49,12 @@ settings = Settings(
     ).lower() == "true",
     token_issuer=os.getenv("TOKEN_ISSUER", "nexora-workforce"),
     token_audience=os.getenv("TOKEN_AUDIENCE", "nexora-workforce-api"),
+    password_min_length=max(8, int(os.getenv("PASSWORD_MIN_LENGTH", "8"))),
+    password_require_uppercase=os.getenv("PASSWORD_REQUIRE_UPPERCASE", "false").lower() == "true",
+    password_require_lowercase=os.getenv("PASSWORD_REQUIRE_LOWERCASE", "false").lower() == "true",
+    password_require_digit=os.getenv("PASSWORD_REQUIRE_DIGIT", "false").lower() == "true",
+    password_require_symbol=os.getenv("PASSWORD_REQUIRE_SYMBOL", "false").lower() == "true",
+    password_history_count=max(0, int(os.getenv("PASSWORD_HISTORY_COUNT", "0"))),
 )
 
 if settings.environment == "production" and (

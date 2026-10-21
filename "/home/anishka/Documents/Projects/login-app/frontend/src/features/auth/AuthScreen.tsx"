@@ -1,2 +1,0 @@
-{authMode === "login" && <p className="auth-switch">Forgot your password?<button type="button" onClick={() => { setAuthMode("forgot"); setNotice(null); }}>Reset password</button></p>}
-      {authMode === "login" && <p className="auth-switch">Received an invitation code?<button type="button" onClick={() => { setAuthMode("invited"); setNotice(null); }}>Complete registration</button></p>}

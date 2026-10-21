@@ -379,6 +379,17 @@ class MFAFactor(TenantScoped, Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP"), onupdate=func.now())
 
 
+class PasswordHistory(TenantScoped, Base):
+    """Tracks previous password hashes to enforce password-history policy."""
+
+    __tablename__ = "password_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+
+
 class Requisition(TenantScoped, Base):
     __tablename__ = "requisitions"
 

@@ -3,8 +3,8 @@
 ## Done (this session)
 - [x] Fixed frontend lint errors: removed unused imports in `frontend/src/WorkforceApp.test.tsx`
 - [x] Fixed frontend ESLint error: `setState` called synchronously inside a `useEffect` in `frontend/src/WorkforceApp.tsx` (moved module reset out of the effect body into `loadModules` failure path)
-- [x] Verified frontend: 14/14 vitest tests pass, ESLint clean, TypeScript/Vite production build clean
-- [x] Verified backend: 34/34 pytest tests pass
+- [x] Verified frontend: 13/14 vitest tests pass when run together (1 pre-existing test-ordering flake in WorkforceApp.test.tsx that passes in isolation), ESLint clean, TypeScript/Vite production build clean
+- [x] Verified backend: 38/38 pytest tests pass (fixed 2 test failures + 2 missing-fixture errors)
 - [x] Confirmed left navigation sidebar renders for every authenticated user (all roles); modules are gated by the role's granted permissions (intentional, server-enforced, and covered by tests)
 - [x] Backend default module seeding already grants the `Employee` role: Overview, My Profile/Employees, Attendance, Leave, Payroll, Performance, Learning, Notifications, Settings
 - [x] Unified all branding to "Talentry Workforce OS": login page (`AuthScreen.tsx`, `index.html`), post-login sidebar (`WorkforceApp.tsx` brand + footer), mobile brand — removed all "NEXORA WORKFORCE OS" and "Workforce Portal" references

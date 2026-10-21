@@ -12,26 +12,6 @@ from database import Base
 from security import hash_password
 
 
-@pytest.fixture
-def client(tmp_path):
-    db_path = tmp_path / "test.sqlite3"
-    app = create_app(f"sqlite:///{db_path}", secret_key="test-secret-key-that-is-long-enough")
-    Base.metadata.create_all(app.state.engine)
-    with Session(app.state.engine) as db:
-        organization = models.Organization(name="NEXORA", slug="nexora")
-        db.add(organization)
-        db.flush()
-        db.info["organization_id"] = organization.id
-        db.add(models.User(name="Test Root", email="root@example.com", role="Super Admin",
-                           active=True, hashed_password=hash_password("test-super-admin-password")))
-        db.flush()
-        root = db.query(models.User).filter_by(email="root@example.com").one()
-        db.add(models.OrganizationMembership(user_id=root.id, role="Super Admin", active=True))
-        db.commit()
-    with TestClient(app) as test_client:
-        yield test_client
-
-
 def admin_login(client):
     return client.post("/api/auth/login", json={
         "email": "root@example.com", "password": "test-super-admin-password",
@@ -507,7 +487,12 @@ def test_dashboard_metrics_filters_password_change_and_leave_overlap(client):
     assert dashboard["employees_on_leave_count"] == 1
 
     start = date.today() + timedelta(days=10)
-    payload = {"start_date": start.isoformat(), "end_date": (start + timedelta(days=1)).isoformat(), "reason": "Family event"}
+    while start.weekday() >= 5:  # skip weekends so the request contains working days
+        start += timedelta(days=1)
+    end = start + timedelta(days=1)
+    while end.weekday() >= 5:  # ensure the end date is also a weekday
+        end += timedelta(days=1)
+    payload = {"start_date": start.isoformat(), "end_date": end.isoformat(), "reason": "Family event"}
     payload["leave_type_id"] = client.get("/api/leave-types", headers=admin_headers).json()[0]["id"]
     assert client.post("/api/leave-requests", json=payload, headers=employee_headers).status_code == 201
     assert client.post("/api/leave-requests", json=payload, headers=employee_headers).status_code == 409

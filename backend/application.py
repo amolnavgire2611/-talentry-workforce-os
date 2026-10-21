@@ -58,7 +58,7 @@ from schemas import (
     ModuleWithPermissions, ModulePermissionUpdate,
     MyPermissionsResponse,
 )
-from security import create_access_token, hash_password, verify_access_token, verify_password
+from security import create_access_token, hash_password, verify_access_token, verify_password, validate_password_complexity, check_password_history
 
 # Department-level access is intentionally not granted until employee-to-user
 # department scope is modeled; this prevents an unscoped manager role bypass.
@@ -76,6 +76,11 @@ ALL_ROLES = {
 logger = logging.getLogger("nexora.api")
 bearer_scheme = HTTPBearer(auto_error=False)
 login_attempts: dict[str, deque[float]] = defaultdict(deque)
+password_reset_attempts: dict[str, deque[float]] = defaultdict(deque)
+registration_attempts: dict[str, deque[float]] = defaultdict(deque)
+invited_registration_attempts: dict[str, deque[float]] = defaultdict(deque)
+# Temporary pending MFA login sessions: login_session_id -> {user_id, expires_at}
+mfa_pending_logins: dict[str, dict] = {}
 
 
 @event.listens_for(Session, "do_orm_execute")
@@ -560,7 +565,17 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
 
     @app.post("/api/auth/register", response_model=AuthResponse, status_code=201)
     @app.post("/api/register", response_model=AuthResponse, status_code=201)
-    def register(data: RegisterRequest, response: Response, db: Session = Depends(get_db)):
+    def register(data: RegisterRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+        now = __import__("time").monotonic()
+        ip_key = request.client.host if request.client else "unknown"
+        email_key = f"email:{str(data.email).strip().lower()}"
+        for attempts, key in ((registration_attempts, ip_key), (registration_attempts, email_key)):
+            window = attempts[key]
+            while window and window[0] < now - 60:
+                window.popleft()
+            if len(window) >= 19:
+                raise HTTPException(429, "Too many registration attempts. Try again in one minute.")
+            window.append(now)
         default_organization(db)
         email = str(data.email).strip().lower()
         if db.query(models.User.id).filter(func.lower(models.User.email) == email).first():
@@ -611,12 +626,17 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
             raise HTTPException(409, "A Super Admin account has already been registered.")
 
         email = str(data.email).strip().lower()
+        try:
+            validate_password_complexity(data.password)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
         user = models.User(
             name=data.name.strip(), email=email,
             hashed_password=hash_password(data.password), role="Super Admin", active=True,
         )
         db.add(user)
         flush(db, "An account with this email already exists.")
+        db.add(models.PasswordHistory(user_id=user.id, hashed_password=user.hashed_password))
         db.add(models.OrganizationMembership(user_id=user.id, role="Super Admin", active=True))
         audit(db, None, "auth.first_super_admin_registered", "user", user.id)
         commit(db, "An account with this email already exists.")
@@ -641,6 +661,25 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
             raise
         attempts.clear()
         login_attempts.pop(key, None)
+
+        # Enforce MFA when a verified TOTP factor is enrolled.
+        factor = db.query(models.MFAFactor).filter_by(user_id=user.id).first()
+        if factor is not None and factor.secret and factor.verified:
+            mfa_session_id = secrets.token_urlsafe(32)
+            mfa_pending_logins[mfa_session_id] = {
+                "user_id": user.id,
+                "expires_at": now + 300,  # 5 minutes to complete MFA
+            }
+            # Clean up expired entries
+            expired = [sid for sid, v in mfa_pending_logins.items() if v["expires_at"] < now]
+            for sid in expired:
+                del mfa_pending_logins[sid]
+            return AuthResponse(
+                message="MFA verification required.",
+                mfa_required=True,
+                mfa_session_id=mfa_session_id,
+                user=UserResponse.model_validate(user),
+            )
         return token_response(user, response, db)
 
     @app.post("/api/auth/refresh", response_model=AuthResponse)
@@ -706,8 +745,16 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
 
     @app.post("/api/auth/activate", response_model=AuthResponse, include_in_schema=False)
     @app.post("/api/auth/register-invited", response_model=AuthResponse, status_code=201)
-    def register_invited_account(data: InvitationRegistrationRequest, response: Response,
+    def register_invited_account(data: InvitationRegistrationRequest, request: Request, response: Response,
                                  db: Session = Depends(get_db)):
+        now = __import__("time").monotonic()
+        key = request.client.host if request.client else "unknown"
+        attempts = invited_registration_attempts[key]
+        while attempts and attempts[0] < now - 60:
+            attempts.popleft()
+        if len(attempts) >= 20:
+            raise HTTPException(429, "Too many registration attempts. Try again in one minute.")
+        attempts.append(now)
         invite = db.query(models.Invitation).filter_by(token_hash=token_digest(data.invitation_token)).first()
         now = datetime.now(timezone.utc)
         if invite is None or invite.accepted_at is not None or invite.expires_at.replace(tzinfo=timezone.utc) <= now:
@@ -820,7 +867,13 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
                         user=Depends(current_user), db: Session = Depends(get_db)):
         if not verify_password(data.current_password, user.hashed_password):
             raise HTTPException(400, "Current password is incorrect")
+        try:
+            validate_password_complexity(data.new_password)
+            check_password_history(db, user.id, data.new_password)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
         user.hashed_password = hash_password(data.new_password)
+        db.add(models.PasswordHistory(user_id=user.id, hashed_password=user.hashed_password))
         payload = verify_access_token(credentials.credentials, app.state.secret_key)
         if payload and payload.get("jti"):
             db.add(models.RevokedToken(
@@ -1803,7 +1856,15 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
     # Password reset (forgot / reset)
     # ------------------------------------------------------------------
     @app.post("/api/auth/password/forgot", status_code=204)
-    def forgot_password(data: ForgotPasswordRequest, response: Response, db: Session = Depends(get_db)):
+    def forgot_password(data: ForgotPasswordRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+        now = __import__("time").monotonic()
+        key = request.client.host if request.client else "unknown"
+        attempts = password_reset_attempts[key]
+        while attempts and attempts[0] < now - 60:
+            attempts.popleft()
+        if len(attempts) >= 4:
+            raise HTTPException(429, "Too many password reset requests. Try again in one minute.")
+        attempts.append(now)
         organization = default_organization(db)
         email = str(data.email).strip().lower()
         user = db.query(models.User).filter(
@@ -1852,7 +1913,13 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
         ).first()
         if user is None or not user.active:
             raise HTTPException(400, "Invalid or expired password reset token.")
+        try:
+            validate_password_complexity(data.new_password)
+            check_password_history(db, user.id, data.new_password)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
         user.hashed_password = hash_password(data.new_password)
+        db.add(models.PasswordHistory(user_id=user.id, hashed_password=user.hashed_password))
         reset.used_at = now
         revoke_user_sessions(db, user.id, now)
         audit(db, user, "auth.password_reset_completed", "user", user.id)
@@ -1949,6 +2016,53 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
         if factor is None:
             raise HTTPException(404, "No MFA factor is enrolled for this account.")
         audit(db, user, "mfa.factor_removed", "mfa_factor", factor.id)
+        db.delete(factor)
+        commit(db)
+        response = Response(status_code=204)
+        return response
+
+    @app.post("/api/auth/mfa/verify-login", response_model=AuthResponse)
+    def mfa_verify_login(data: MFAVerifyRequest, request: Request, response: Response,
+                         db: Session = Depends(get_db)):
+        now = __import__("time").monotonic()
+        session_id = data.mfa_session_id if hasattr(data, "mfa_session_id") else None
+        if not session_id or session_id not in mfa_pending_logins:
+            raise HTTPException(400, "Invalid or expired MFA login session.")
+        pending = mfa_pending_logins[session_id]
+        if pending["expires_at"] < now:
+            del mfa_pending_logins[session_id]
+            raise HTTPException(400, "MFA login session has expired. Sign in again.")
+        user = db.get(models.User, pending["user_id"])
+        if user is None or not user.active:
+            del mfa_pending_logins[session_id]
+            raise HTTPException(401, "Account is inactive.")
+        factor = db.query(models.MFAFactor).filter_by(user_id=user.id).first()
+        code = data.code.strip()
+        if code in (factor.backup_codes if factor and factor.backup_codes else []):
+            backup_codes = [c for c in factor.backup_codes if c != code]
+            factor.backup_codes = backup_codes
+            factor.verified = True
+            audit(db, user, "mfa.backup_code_used", "mfa_factor", factor.id)
+        elif factor is None or not factor.secret or not _verify_totp(factor.secret, code):
+            raise HTTPException(400, "Invalid verification code.")
+        else:
+            audit(db, user, "mfa.login_verified", "mfa_factor", factor.id)
+        del mfa_pending_logins[session_id]
+        activate_membership(db, user)
+        audit(db, user, "auth.login", "user", user.id)
+        commit(db)
+        return token_response(user, response, db, message="Login successful!")
+
+    @app.delete("/api/auth/mfa/reset/{user_id}", status_code=204)
+    def mfa_admin_reset(user_id: int, admin=Depends(require_roles("Super Admin")),
+                        db: Session = Depends(get_db)):
+        target = db.get(models.User, user_id)
+        if target is None:
+            raise HTTPException(404, "User not found")
+        factor = db.query(models.MFAFactor).filter_by(user_id=user_id).first()
+        if factor is None:
+            raise HTTPException(404, "No MFA factor is enrolled for this account.")
+        audit(db, admin, "mfa.admin_reset", "user", user_id)
         db.delete(factor)
         commit(db)
         response = Response(status_code=204)
