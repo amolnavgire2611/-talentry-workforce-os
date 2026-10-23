@@ -55,7 +55,7 @@ from schemas import (
     NotificationCreate, NotificationResponse,
     AnnouncementCreate, AnnouncementResponse,
     ModuleResponse, RoleModulePermissionResponse,
-    ModuleWithPermissions, ModulePermissionUpdate,
+    ModuleWithPermissions, ModulePermissionUpdate, ModuleCreate, ModuleUpdate,
     MyPermissionsResponse,
 )
 from security import create_access_token, hash_password, verify_access_token, verify_password, validate_password_complexity, check_password_history
@@ -1423,7 +1423,7 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
     def attendance(user_id: int | None = None, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),
                    user=Depends(current_user), db: Session = Depends(get_db)):
         query = db.query(models.Attendance)
-        if user.role in HR_MANAGERS | {"Attendance Administrator"}:
+        if user.role in ATTENDANCE_READERS:
             if user_id is not None:
                 query = query.filter(models.Attendance.user_id == user_id)
         elif user.role == "Department Manager":
@@ -2190,10 +2190,32 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
 
     @app.get("/api/payroll/payslips", response_model=list[PayslipResponse])
     def list_payslips(user: models.User = Depends(current_user), db: Session = Depends(get_db)):
-        query = db.query(models.Payslip)
+        query = db.query(models.Payslip, models.Employee.name).join(
+            models.Employee, models.Employee.id == models.Payslip.employee_id
+        )
         if user.role not in PAYROLL_ROLES:
-            query = query.filter_by(employee_id=user.id)
-        return query.order_by(models.Payslip.created_at.desc()).all()
+            # Payslip.employee_id references Employee.id, not User.id; resolve the
+            # employee profile linked to this account before scoping the query.
+            emp = db.query(models.Employee).filter_by(user_id=user.id).first()
+            if emp is None:
+                return []
+            query = query.filter(models.Payslip.employee_id == emp.id)
+        rows = query.order_by(models.Payslip.created_at.desc()).all()
+        return [
+            PayslipResponse(
+                id=payslip.id,
+                payroll_run_id=payslip.payroll_run_id,
+                employee_id=payslip.employee_id,
+                employee_name=employee_name,
+                gross_pay=payslip.gross_pay,
+                deductions=payslip.deductions,
+                net_pay=payslip.net_pay,
+                payslip_date=payslip.payslip_date,
+                status=payslip.status,
+                created_at=payslip.created_at,
+            )
+            for payslip, employee_name in rows
+        ]
 
     # ------------------------------------------------------------------
     # Recruitment
@@ -2669,28 +2691,46 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
     ]
 
     def seed_default_modules(db: Session) -> None:
-        existing = db.query(models.Module.id).first()
-        if existing is not None:
-            return
-        organization = default_organization(db)
+        current_org_id = db.info.get("organization_id")
+        if current_org_id is not None:
+            organization = db.get(models.Organization, current_org_id)
+            if organization is None or not organization.active:
+                return
+        else:
+            try:
+                organization = default_organization(db)
+            except HTTPException:
+                return
+        existing_modules = {
+            m.module_key: m for m in db.query(models.Module).filter_by(organization_id=organization.id).all()
+        }
         for mod in DEFAULT_MODULES:
-            row = models.Module(
-                organization_id=organization.id,
-                module_key=mod["module_key"],
-                name=mod["name"],
-                description=mod["description"],
-                active=True,
-            )
-            db.add(row)
-            db.flush()
-            for role in ALL_ROLES:
-                granted = role in mod["default_granted"]
-                db.add(models.RoleModulePermission(
+            if mod["module_key"] in existing_modules:
+                row = existing_modules[mod["module_key"]]
+            else:
+                row = models.Module(
                     organization_id=organization.id,
-                    module_id=row.id,
-                    role=role,
-                    granted=granted,
-                ))
+                    module_key=mod["module_key"],
+                    name=mod["name"],
+                    description=mod["description"],
+                    active=True,
+                )
+                db.add(row)
+                db.flush()
+                existing_modules[mod["module_key"]] = row
+            # Ensure a permission row exists for every role without clobbering
+            # any access changes an administrator has made through the UI.
+            existing_perms = {
+                p.role: p for p in db.query(models.RoleModulePermission).filter_by(module_id=row.id).all()
+            }
+            for role in ALL_ROLES:
+                if role not in existing_perms:
+                    db.add(models.RoleModulePermission(
+                        organization_id=organization.id,
+                        module_id=row.id,
+                        role=role,
+                        granted=role in mod["default_granted"],
+                    ))
         # Persist the seed immediately: request sessions only close() without
         # committing, which would otherwise roll the catalog back on every call.
         db.commit()
@@ -2737,11 +2777,86 @@ def create_app(database_url: str | None = None, secret_key: str | None = None,
         return ModuleWithPermissions.model_validate(module).model_copy(
             update={"permissions": [RoleModulePermissionResponse.model_validate(p) for p in perms]})
 
+    @app.post("/api/modules", response_model=ModuleWithPermissions, status_code=201)
+    def create_module(data: ModuleCreate,
+                      _admin=Depends(require_roles("Super Admin")), db: Session = Depends(get_db)):
+        seed_default_modules(db)
+        org_id = _admin.organization_id
+        if db.query(models.Module).filter_by(organization_id=org_id, module_key=data.module_key).first() is not None:
+            raise HTTPException(409, f"Module '{data.module_key}' already exists")
+        if data.parent_id is not None:
+            parent = db.get(models.Module, data.parent_id)
+            if parent is None or parent.organization_id != org_id:
+                raise HTTPException(404, "Parent module not found")
+        module = models.Module(
+            organization_id=org_id,
+            module_key=data.module_key,
+            name=data.name,
+            description=data.description,
+            parent_id=data.parent_id,
+            active=True,
+        )
+        db.add(module)
+        db.flush()
+        for role in ALL_ROLES:
+            db.add(models.RoleModulePermission(
+                organization_id=org_id,
+                module_id=module.id,
+                role=role,
+                granted=(role == "Super Admin"),
+            ))
+        commit(db)
+        perms = db.query(models.RoleModulePermission).filter_by(module_id=module.id).order_by(
+            models.RoleModulePermission.role).all()
+        audit(db, _admin, "module.created", "module", module.id, {"module_key": data.module_key,
+                                                                   "parent_id": data.parent_id})
+        return ModuleWithPermissions.model_validate(module).model_copy(
+            update={"permissions": [RoleModulePermissionResponse.model_validate(p) for p in perms]})
+
+    @app.put("/api/modules/{module_id}", response_model=ModuleWithPermissions)
+    def update_module(module_id: int, data: ModuleUpdate,
+                      _admin=Depends(require_roles("Super Admin")), db: Session = Depends(get_db)):
+        seed_default_modules(db)
+        module = db.get(models.Module, module_id)
+        if module is None or module.organization_id != _admin.organization_id:
+            raise HTTPException(404, "Module not found")
+        if data.name is not None:
+            module.name = data.name
+        if "description" in data.model_fields_set:
+            module.description = data.description
+        if data.active is not None:
+            module.active = data.active
+        if "parent_id" in data.model_fields_set:
+            if data.parent_id is not None:
+                parent = db.get(models.Module, data.parent_id)
+                if parent is None or parent.organization_id != _admin.organization_id:
+                    raise HTTPException(404, "Parent module not found")
+                if parent.id == module.id:
+                    raise HTTPException(422, "A module cannot be its own parent")
+            module.parent_id = data.parent_id
+        commit(db)
+        perms = db.query(models.RoleModulePermission).filter_by(module_id=module.id).order_by(
+            models.RoleModulePermission.role).all()
+        audit(db, _admin, "module.updated", "module", module.id, {"module_id": module_id})
+        return ModuleWithPermissions.model_validate(module).model_copy(
+            update={"permissions": [RoleModulePermissionResponse.model_validate(p) for p in perms]})
+
+    @app.delete("/api/modules/{module_id}", status_code=204)
+    def delete_module(module_id: int,
+                      _admin=Depends(require_roles("Super Admin")), db: Session = Depends(get_db)):
+        seed_default_modules(db)
+        module = db.get(models.Module, module_id)
+        if module is None or module.organization_id != _admin.organization_id:
+            raise HTTPException(404, "Module not found")
+        db.delete(module)
+        commit(db)
+        audit(db, _admin, "module.deleted", "module", module_id, {})
+
     @app.get("/api/my-permissions", response_model=MyPermissionsResponse)
     def my_permissions(user=Depends(current_user), db: Session = Depends(get_db)):
         seed_default_modules(db)
         if user.role == "Super Admin":
-            accessible = [m["module_key"] for m in DEFAULT_MODULES]
+            accessible = [m.module_key for m in db.query(models.Module).filter_by(active=True).all()]
         else:
             modules = db.query(models.Module).filter_by(active=True).all()
             accessible = []

@@ -542,6 +542,7 @@ class Module(TenantScoped, Base):
     module_key = Column(String(60), nullable=False, index=True)
     name = Column(String(120), nullable=False)
     description = Column(Text, nullable=True)
+    parent_id = Column(Integer, ForeignKey("modules.id", ondelete="CASCADE"), nullable=True, index=True)
     active = Column(Boolean, nullable=False, default=True, server_default="1")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 

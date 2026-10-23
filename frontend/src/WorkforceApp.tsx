@@ -32,9 +32,9 @@ type AppNotification = { id: number; user_id: number; title: string; message: st
 type Announcement = { id: number; title: string; body: string; pinned: boolean; created_by: number | null; created_at: string; expires_at: string | null };
 type ReportSummary = { employee_count: number; active_employee_count: number; department_count: number; pending_leave_requests: number; present_today: number; payroll_gross_total: string; payroll_deductions_total: string; payroll_net_total: string; open_requisitions: number; active_training_enrollments: number };
 type ModulePermission = { id: number; module_id: number; role: string; granted: boolean; created_at: string };
-type Module = { id: number; module_key: string; name: string; description: string | null; active: boolean; created_at: string; permissions: ModulePermission[] };
+type Module = { id: number; module_key: string; name: string; description: string | null; parent_id: number | null; active: boolean; created_at: string; permissions: ModulePermission[] };
 type MyPermissions = { accessible_modules: string[]; modules: Module[] };
-type Section = "overview" | "employees" | "departments" | "organization" | "attendance" | "leave" | "users" | "payroll" | "recruitment" | "performance" | "learning" | "notifications" | "reports" | "settings" | "module-access";
+type Section = string;
 
 const MODULE_LABELS: Record<string, { label: string; icon: string }> = {
   overview: { label: "Overview", icon: "◫" },
@@ -66,6 +66,83 @@ function dateLabel(date: string): string {
 
 function timeLabel(timestamp: string): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function ModuleTree({
+  module,
+  modules,
+  depth = 0,
+  moduleAccessDraft,
+  setModuleAccessDraft,
+  busy,
+  removeModule,
+}: {
+  module: Module;
+  modules: Module[];
+  depth?: number;
+  moduleAccessDraft: Record<string, boolean>;
+  setModuleAccessDraft: (
+    val: Record<string, boolean> | ((prev: Record<string, boolean>) => Record<string, boolean>)
+  ) => void;
+  busy: boolean;
+  removeModule: (module: Module) => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [local, setLocal] = useState(module);
+  const [checking, setChecking] = useState(false);
+  const childCount = modules.filter((m) => m.parent_id === module.id).length;
+  const toggle = () => {
+    setChecking(true);
+    setTimeout(() => { setLocal((l) => ({ ...l, active: !l.active })); setChecking(false); }, 200);
+  };
+  return (
+    <tr>
+      <td style={{ paddingLeft: `${18 + depth * 18}px` }}>
+        <div className="tree-row" onClick={() => toggle()}>
+          <span className={"tree-toggle" + (local.active ? " open" : "")}></span>
+          <input
+            type="checkbox"
+            checked={local.active}
+            disabled={checking}
+            onChange={toggle}
+            aria-label={`Toggle ${local.name}`}
+          />
+          <span className="tree-name">{local.name}</span>
+          {childCount > 0 && <span className="tree-count">{childCount}</span>}
+        </div>
+        {(local.active || !local.active) && modules.filter((m) => m.parent_id === module.id).map((child) => (
+          <ModuleTree
+            key={child.id}
+            module={child}
+            modules={modules}
+            depth={depth + 1}
+            moduleAccessDraft={moduleAccessDraft}
+            setModuleAccessDraft={setModuleAccessDraft}
+            busy={busy}
+            removeModule={removeModule}
+          />
+        ))}
+      </td>
+      <td style={{ paddingLeft: `${18 + depth * 18 + 12}px` }}><small>{local.description ?? "—"}</small></td>
+      {MODULE_ROLES.map((role) => (
+        <td key={role}>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={local.permissions.find((p) => p.role === role)?.granted ?? false}
+              onChange={(event) => setModuleAccessDraft({ ...moduleAccessDraft, [`${local.module_key}:${role}`]: event.target.checked })}
+            />
+            <span className="checkmark"></span>
+          </label>
+        </td>
+      ))}
+      <td style={{ paddingTop: "6px", paddingBottom: "6px" }}>
+        <button className="icon-button" title="Delete module" onClick={() => removeModule(module)} disabled={busy}>
+          <span aria-hidden="true">✕</span>
+        </button>
+      </td>
+    </tr>
+  );
 }
 
 export default function WorkforceApp() {
@@ -109,6 +186,7 @@ export default function WorkforceApp() {
   const [requisitions, setRequisitions] = useState<Requisition[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [requisitionDraft, setRequisitionDraft] = useState({ title: "", department: "", employment_type: "Permanent" });
+  const [candidateDraft, setCandidateDraft] = useState({ requisition_id: "", name: "", email: "", phone: "" });
   const [showRequisitionForm, setShowRequisitionForm] = useState(false);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [reviewCycles, setReviewCycles] = useState<ReviewCycle[]>([]);
@@ -139,6 +217,8 @@ export default function WorkforceApp() {
   const [sessions, setSessions] = useState<RefreshSession[]>([]);
   const [invitationDraft, setInvitationDraft] = useState({ name: "", email: "", role: "Employee", department_id: "", employee_id: "" });
   const [moduleAccessDraft, setModuleAccessDraft] = useState<Record<string, boolean>>({});
+  const [showModuleForm, setShowModuleForm] = useState(false);
+  const [moduleDraft, setModuleDraft] = useState({ module_key: "", name: "", description: "", parent_id: "" });
   const [issuedInvitation, setIssuedInvitation] = useState<{ email: string; token: string; expires_at: string } | null>(null);
   const [mfaEnabled, setMfaEnabled] = useState(false);
   const [mfaEnrolling, setMfaEnrolling] = useState(false);
@@ -158,7 +238,9 @@ export default function WorkforceApp() {
   const canAdminOrganization = modulesLoaded && accessibleModules.includes("organization");
   const canManageOrganizationStructure = modulesLoaded && accessibleModules.includes("organization");
   const canAdminPayroll = modulesLoaded && accessibleModules.includes("payroll");
+  const canManageRecruitment = modulesLoaded && accessibleModules.includes("recruitment");
   const canReviewLeave = modulesLoaded && accessibleModules.includes("leave");
+  const canManageLeavePolicy = modulesLoaded && accessibleModules.includes("leave");
   const canManagePerformance = modulesLoaded && accessibleModules.includes("performance");
   const canManageLearning = modulesLoaded && accessibleModules.includes("learning");
   const canSendNotifications = modulesLoaded && accessibleModules.includes("notifications");
@@ -537,6 +619,13 @@ export default function WorkforceApp() {
     catch (error) { setNotice({ kind: "error", text: errorMessage(error) }); }
   }
 
+  async function saveCandidate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy(true);
+    try { await api<Candidate>("/api/recruitment/candidates", { method: "POST", body: jsonBody({ ...candidateDraft, requisition_id: Number(candidateDraft.requisition_id) }) }); setNotice({ kind: "success", text: "Candidate added." }); setCandidateDraft({ requisition_id: "", name: "", email: "", phone: "" }); setShowCandidateForm(false); await loadRecruitment(); }
+    catch (error) { setNotice({ kind: "error", text: errorMessage(error) }); }
+    finally { setBusy(false); }
+  }
+
   async function submitLeave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true);
     try { await api<LeaveRequest>("/api/leave-requests", { method: "POST", body: jsonBody({ ...leaveDraft, leave_type_id: Number(leaveDraft.leave_type_id) }) }); setLeaveDraft({ start_date: "", end_date: "", leave_type_id: leaveTypes[0] ? String(leaveTypes[0].id) : "", half_day: false, reason: "" }); setNotice({ kind: "success", text: "Leave request submitted for review." }); await Promise.all([loadLeave(), loadDashboard()]); }
@@ -575,6 +664,29 @@ export default function WorkforceApp() {
     if (!window.confirm("Cancel this leave request? Future approved leave will be returned to your balance.")) return;
     try { await api<LeaveRequest>(`/api/leave-requests/${request.id}/cancel`, { method: "POST" }); setNotice({ kind: "success", text: "Leave request cancelled." }); await Promise.all([loadLeave(), loadDashboard()]); }
     catch (error) { setNotice({ kind: "error", text: errorMessage(error) }); }
+  }
+
+  async function saveModule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy(true);
+    try {
+      await api<Module>('/api/modules', { method: 'POST', body: jsonBody({
+        module_key: moduleDraft.module_key,
+        name: moduleDraft.name,
+        description: moduleDraft.description || null,
+        ...(moduleDraft.parent_id ? { parent_id: Number(moduleDraft.parent_id) } : {}),
+      }) });
+      setShowModuleForm(false);
+      setModuleDraft({ module_key: '', name: '', description: '', parent_id: '' });
+      setNotice({ kind: 'success', text: 'Module created.' });
+      await loadModules();
+    } catch (error) { setNotice({ kind: 'error', text: errorMessage(error) }); }
+    finally { setBusy(false); }
+  }
+
+  async function removeModule(module: Module) {
+    if (!window.confirm('Delete this module and its submodules?')) return;
+    try { await api<void>(`/api/modules/${module.id}`, { method: 'DELETE' }); setNotice({ kind: 'success', text: 'Module deleted.' }); await loadModules(); }
+    catch (error) { setNotice({ kind: 'error', text: errorMessage(error) }); }
   }
 
   async function changeUser(userId: number, patch: { role?: string; active?: boolean }) {
@@ -834,7 +946,7 @@ export default function WorkforceApp() {
 
 {active === "attendance" && <><section className="attendance-banner"><div><p className="eyebrow">DAILY TIME RECORD</p><h2>{todayAttendance ? (todayAttendance.check_out ? "Your workday is complete" : "You're checked in") : "Start your workday"}</h2><p>{todayAttendance ? `Checked in at ${timeLabel(todayAttendance.check_in)}${todayAttendance.check_out ? ` · Checked out at ${timeLabel(todayAttendance.check_out)}` : ""}` : "Record attendance when you begin work. Times are stored by the API in UTC."}</p></div><div className="attendance-actions"><button className="primary-button" onClick={() => void clock("clock-in")} disabled={Boolean(todayAttendance)}>Check in</button><button className="secondary-button" onClick={() => void clock("clock-out")} disabled={!todayAttendance || Boolean(todayAttendance.check_out)}>Check out</button></div></section><section className="surface-card module-card"><div className="card-heading"><div><h2>{canManage ? "Attendance records" : "Your attendance history"}</h2><p>Records are based on explicit check-in and check-out events.</p></div></div><div className="table-scroll"><table className="data-table"><thead><tr>{canManage && <th>USER ID</th>}<th>WORK DATE</th><th>CHECK IN</th><th>CHECK OUT</th><th>STATUS</th></tr></thead><tbody>{(attendance?.items ?? []).map((row) => <tr key={row.id}>{canManage && <td>{row.user_id}</td>}<td>{dateLabel(row.work_date)}</td><td>{timeLabel(row.check_in)} UTC</td><td>{row.check_out ? `${timeLabel(row.check_out)} UTC` : "—"}</td><td><span className="status-badge green"><i/>{row.status}</span></td></tr>)}{attendance?.items.length === 0 && <tr><td colSpan={canManage ? 5 : 4}><EmptyState title="No attendance records" detail="Attendance appears here after a check-in is recorded."/></td></tr>}</tbody></table></div></section></>}
 
-{active === "leave" && <><section className="module-summary-strip"><div><span>Requests awaiting review</span><b>{user.role === "Employee" ? dashboard?.my_pending_leave_requests ?? 0 : dashboard?.pending_leave_requests ?? 0}</b></div><div><span>Your pending requests</span><b>{dashboard?.my_pending_leave_requests ?? 0}</b></div><small>Annual balances deduct only after approval. Weekends and configured holidays are excluded; leave policies use a calendar-year allocation.</small></section>{leaveBalances.length > 0 && <section className="leave-balance-grid" aria-label="Your leave balances">{leaveBalances.map((balance) => <article className="leave-balance-card" key={balance.id}><span>{balance.leave_type}</span><b>{balance.remaining_days}<small> / {balance.allocated_days} days</small></b><p>{balance.used_days} used · {balance.pending_days} pending · {balance.year}</p></article>)}</section>}{canManage && <section className="surface-card policy-panel"><div className="card-heading"><div><h2>Leave policies</h2><p>Configure leave categories and yearly allocations; no statutory allowance is assumed.</p></div><button className="secondary-button" onClick={() => setShowLeavePolicyForm(!showLeavePolicyForm)}>{showLeavePolicyForm ? "Cancel" : "＋ Add leave type"}</button></div>{showLeavePolicyForm && <form className="record-form" onSubmit={saveLeavePolicy}><div className="form-grid two-col"><label>Leave type<input value={leavePolicyDraft.name} onChange={(event) => setLeavePolicyDraft({ ...leavePolicyDraft, name: event.target.value })} required minLength={2} maxLength={80} placeholder="e.g. Annual leave"/></label><label>Annual allocation (days)<input type="number" min="0" max="365" value={leavePolicyDraft.annual_allowance_days} onChange={(event) => setLeavePolicyDraft({ ...leavePolicyDraft, annual_allowance_days: event.target.value })} required/></label><label>Description<input value={leavePolicyDraft.description} onChange={(event) => setLeavePolicyDraft({ ...leavePolicyDraft, description: event.target.value })} maxLength={500} placeholder="Policy description"/></label><label className="checkbox-label"><input type="checkbox" checked={leavePolicyDraft.paid} onChange={(event) => setLeavePolicyDraft({ ...leavePolicyDraft, paid: event.target.checked })}/> Paid leave</label></div><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Create leave type"}</button></form>}<div className="policy-list">{leaveTypes.map((policy) => <article className="policy-row" key={policy.id}><span><b>{policy.name}</b><small>{policy.annual_allowance_days} days per calendar year · {policy.paid ? "Paid" : "Unpaid"}</small></span><button className="row-action" onClick={() => void toggleLeavePolicy(policy)}>Archive</button></article>)}</div></section>}<div className="leave-layout"><section className="surface-card module-card"><div className="card-heading"><div><h2>Request time off</h2><p>Submit a request for manager review.</p></div></div>{leaveTypes.length === 0 ? <EmptyState title="No leave policy is configured" detail="Ask an HR administrator to create a leave type before submitting a request."/> : <form className="record-form leave-form" onSubmit={submitLeave}><div className="form-grid two-col"><label>First day<input type="date" value={leaveDraft.start_date} onChange={(e) => setLeaveDraft({ ...leaveDraft, start_date: e.target.value })} required/></label><label>Last day<input type="date" min={leaveDraft.start_date || undefined} value={leaveDraft.end_date} onChange={(e) => setLeaveDraft({ ...leaveDraft, end_date: e.target.value })} required/></label></div><label>Leave type<select value={leaveDraft.leave_type_id} onChange={(event) => setLeaveDraft({ ...leaveDraft, leave_type_id: event.target.value })} required>{leaveTypes.map((type) => <option key={type.id} value={type.id}>{type.name} · {type.annual_allowance_days} days</option>)}</select></label><label className="checkbox-label"><input type="checkbox" checked={leaveDraft.half_day} onChange={(event) => setLeaveDraft({ ...leaveDraft, half_day: event.target.checked, ...(event.target.checked && leaveDraft.start_date ? { end_date: leaveDraft.start_date } : {}) })}/> Half-day request</label><label>Reason<textarea minLength={5} maxLength={1000} rows={4} value={leaveDraft.reason} onChange={(e) => setLeaveDraft({ ...leaveDraft, reason: e.target.value })} placeholder="Share a brief reason for your request" required/></label><button className="primary-button" disabled={busy}>{busy ? "Submitting…" : "Submit leave request"}</button></form>}</section><section className="surface-card module-card"><div className="card-heading"><div><h2>{canReviewLeave ? "Leave inbox" : "Your requests"}</h2><p>Pending requests can be reviewed by authorized HR managers or your assigned department manager.</p></div></div><div className="leave-list">{(leaveRequests?.items ?? []).map((request) => <article className="leave-item" key={request.id}><div className="leave-item-top"><span className={`status-badge ${request.status === "Approved" ? "green" : request.status === "Rejected" ? "red" : "amber"}`}><i/>{request.status}</span><small>Request #{request.id}{canManage ? ` · User ${request.user_id}` : ""}</small></div><b>{dateLabel(request.start_date)} – {dateLabel(request.end_date)}</b><p>{request.reason}</p>{canReviewLeave && request.status === "Pending" && request.user_id !== user.id && <div className="review-actions"><button className="secondary-button" onClick={() => void reviewLeave(request, "Rejected")}>Decline</button><button className="primary-button" onClick={() => void reviewLeave(request, "Approved")}>Approve</button></div>}{request.user_id === user.id && (request.status === "Pending" || (request.status === "Approved" && request.start_date > new Date().toISOString().slice(0, 10))) && <button className="row-action danger" onClick={() => void cancelLeave(request)}>Cancel request</button>}{request.review_comment && <p className="review-comment"><b>Reviewer note:</b> {request.review_comment}</p>}</article>)}{leaveRequests?.items.length === 0 && <EmptyState title="No leave requests" detail="New requests and their review outcomes will appear here."/>}</div></section></div></>}
+{active === "leave" && <><section className="module-summary-strip"><div><span>Requests awaiting review</span><b>{user.role === "Employee" ? dashboard?.my_pending_leave_requests ?? 0 : dashboard?.pending_leave_requests ?? 0}</b></div><div><span>Your pending requests</span><b>{dashboard?.my_pending_leave_requests ?? 0}</b></div><small>Annual balances deduct only after approval. Weekends and configured holidays are excluded; leave policies use a calendar-year allocation.</small></section>{leaveBalances.length > 0 && <section className="leave-balance-grid" aria-label="Your leave balances">{leaveBalances.map((balance) => <article className="leave-balance-card" key={balance.id}><span>{balance.leave_type}</span><b>{balance.remaining_days}<small> / {balance.allocated_days} days</small></b><p>{balance.used_days} used · {balance.pending_days} pending · {balance.year}</p></article>)}</section>}{canManageLeavePolicy && <section className="surface-card policy-panel"><div className="card-heading"><div><h2>Leave policies</h2><p>Configure leave categories and yearly allocations; no statutory allowance is assumed.</p></div><button className="secondary-button" onClick={() => setShowLeavePolicyForm(!showLeavePolicyForm)}>{showLeavePolicyForm ? "Cancel" : "＋ Add leave type"}</button></div>{showLeavePolicyForm && <form className="record-form" onSubmit={saveLeavePolicy}><div className="form-grid two-col"><label>Leave type<input value={leavePolicyDraft.name} onChange={(event) => setLeavePolicyDraft({ ...leavePolicyDraft, name: event.target.value })} required minLength={2} maxLength={80} placeholder="e.g. Annual leave"/></label><label>Annual allocation (days)<input type="number" min="0" max="365" value={leavePolicyDraft.annual_allowance_days} onChange={(event) => setLeavePolicyDraft({ ...leavePolicyDraft, annual_allowance_days: event.target.value })} required/></label><label>Description<input value={leavePolicyDraft.description} onChange={(event) => setLeavePolicyDraft({ ...leavePolicyDraft, description: event.target.value })} maxLength={500} placeholder="Policy description"/></label><label className="checkbox-label"><input type="checkbox" checked={leavePolicyDraft.paid} onChange={(event) => setLeavePolicyDraft({ ...leavePolicyDraft, paid: event.target.checked })}/> Paid leave</label></div><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Create leave type"}</button></form>}<div className="policy-list">{leaveTypes.map((policy) => <article className="policy-row" key={policy.id}><span><b>{policy.name}</b><small>{policy.annual_allowance_days} days per calendar year · {policy.paid ? "Paid" : "Unpaid"}</small></span><button className="row-action" onClick={() => void toggleLeavePolicy(policy)}>Archive</button></article>)}</div></section>}<div className="leave-layout"><section className="surface-card module-card"><div className="card-heading"><div><h2>Request time off</h2><p>Submit a request for manager review.</p></div></div>{leaveTypes.length === 0 ? <EmptyState title="No leave policy is configured" detail="Ask an HR administrator to create a leave type before submitting a request."/> : <form className="record-form leave-form" onSubmit={submitLeave}><div className="form-grid two-col"><label>First day<input type="date" value={leaveDraft.start_date} onChange={(e) => setLeaveDraft({ ...leaveDraft, start_date: e.target.value })} required/></label><label>Last day<input type="date" min={leaveDraft.start_date || undefined} value={leaveDraft.end_date} onChange={(e) => setLeaveDraft({ ...leaveDraft, end_date: e.target.value })} required/></label></div><label>Leave type<select value={leaveDraft.leave_type_id} onChange={(event) => setLeaveDraft({ ...leaveDraft, leave_type_id: event.target.value })} required>{leaveTypes.map((type) => <option key={type.id} value={type.id}>{type.name} · {type.annual_allowance_days} days</option>)}</select></label><label className="checkbox-label"><input type="checkbox" checked={leaveDraft.half_day} onChange={(event) => setLeaveDraft({ ...leaveDraft, half_day: event.target.checked, ...(event.target.checked && leaveDraft.start_date ? { end_date: leaveDraft.start_date } : {}) })}/> Half-day request</label><label>Reason<textarea minLength={5} maxLength={1000} rows={4} value={leaveDraft.reason} onChange={(e) => setLeaveDraft({ ...leaveDraft, reason: e.target.value })} placeholder="Share a brief reason for your request" required/></label><button className="primary-button" disabled={busy}>{busy ? "Submitting…" : "Submit leave request"}</button></form>}</section><section className="surface-card module-card"><div className="card-heading"><div><h2>{canReviewLeave ? "Leave inbox" : "Your requests"}</h2><p>Pending requests can be reviewed by authorized HR managers or your assigned department manager.</p></div></div><div className="leave-list">{(leaveRequests?.items ?? []).map((request) => <article className="leave-item" key={request.id}><div className="leave-item-top"><span className={`status-badge ${request.status === "Approved" ? "green" : request.status === "Rejected" ? "red" : "amber"}`}><i/>{request.status}</span><small>Request #{request.id}{canManageLeavePolicy ? ` · User ${request.user_id}` : ""}</small></div><b>{dateLabel(request.start_date)} – {dateLabel(request.end_date)}</b><p>{request.reason}</p>{canReviewLeave && request.status === "Pending" && request.user_id !== user.id && <div className="review-actions"><button className="secondary-button" onClick={() => void reviewLeave(request, "Rejected")}>Decline</button><button className="primary-button" onClick={() => void reviewLeave(request, "Approved")}>Approve</button></div>}{request.user_id === user.id && (request.status === "Pending" || (request.status === "Approved" && request.start_date > new Date().toISOString().slice(0, 10))) && <button className="row-action danger" onClick={() => void cancelLeave(request)}>Cancel request</button>}{request.review_comment && <p className="review-comment"><b>Reviewer note:</b> {request.review_comment}</p>}</article>)}{leaveRequests?.items.length === 0 && <EmptyState title="No leave requests" detail="New requests and their review outcomes will appear here."/>}</div></section></div></>}
 {active === "users" && canAdminUsers && <div className="user-admin-layout"><section className="surface-card module-card"><div className="card-heading"><div><h2>Invite an account</h2><p>The invitee completes registration with a one-time code before the account is enabled.</p></div></div><form className="record-form" onSubmit={provisionAccount}><div className="form-grid two-col"><label>Full name<input required minLength={2} maxLength={100} value={invitationDraft.name} onChange={(event) => setInvitationDraft({ ...invitationDraft, name: event.target.value })}/></label><label>Work email<input type="email" required value={invitationDraft.email} onChange={(event) => setInvitationDraft({ ...invitationDraft, email: event.target.value })}/></label><label>Account role<select value={invitationDraft.role} onChange={(event) => setInvitationDraft({ ...invitationDraft, role: event.target.value })}><option>Employee</option><option>Department Manager</option><option>Recruiter</option><option>Attendance Administrator</option>{user.role === "Super Admin" && <><option>Organization Admin</option><option>HR Administrator</option><option>HR Manager</option><option>Payroll Administrator</option></>}</select></label>{invitationDraft.role === "Department Manager" && <label>Assigned department<select required value={invitationDraft.department_id} onChange={(event) => setInvitationDraft({ ...invitationDraft, department_id: event.target.value })}><option value="">Select department</option>{departments.filter((department) => department.active).map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>}{invitationDraft.role === "Employee" && <label>Employee profile<select required value={invitationDraft.employee_id} onChange={(event) => setInvitationDraft({ ...invitationDraft, employee_id: event.target.value })}><option value="">Select an unlinked employee</option>{employees.filter((employee) => !employee.user_id).map((employee) => <option key={employee.id} value={employee.id}>{employee.employee_code} · {employee.name}</option>)}</select></label>}</div><button className="primary-button" disabled={busy}>{busy ? "Creating invitation…" : "Send registration invitation"}</button></form>{issuedInvitation && <div className="invitation-result" role="status"><b>One-time registration code for {issuedInvitation.email}</b><p>Expires {new Date(issuedInvitation.expires_at).toLocaleString()}. Copy the code now and deliver it only through a trusted private channel.</p><code>{issuedInvitation.token}</code><button className="secondary-button" onClick={() => void navigator.clipboard.writeText(issuedInvitation.token)}>Copy registration code</button></div>}</section><section className="surface-card module-card"><div className="card-heading"><div><h2>Account access</h2><p>Roles are server-assigned. Only Super Admin may change roles.</p></div></div><div className="table-scroll"><table className="data-table"><thead><tr><th>ACCOUNT</th><th>ROLE</th><th>STATUS</th><th>ACCESS</th></tr></thead><tbody>{(users?.items ?? []).map((account) => <tr key={account.id}><td><div className="person-cell"><span className="person-avatar">{account.name.slice(0, 1).toUpperCase()}</span><span><b>{account.name}</b><small>{account.email}</small></span></div></td><td>{user.role === "Super Admin" && account.id !== user.id ? <select className="inline-select" value={account.role} onChange={(event) => void changeUser(account.id, { role: event.target.value })}>{["Organization Admin", "HR Administrator", "HR Manager", "Department Manager", "Recruiter", "Payroll Administrator", "Attendance Administrator", "Employee"].map((role) => <option key={role}>{role}</option>)}</select> : account.role}</td><td><span className={`status-badge ${account.registration_pending ? "amber" : account.active ? "green" : "muted"}`}><i/>{account.registration_pending ? "Registration pending" : account.active ? "Active" : "Inactive"}</span></td><td><button className="row-action" disabled={busy || account.id === user.id} onClick={() => account.registration_pending ? void reissueRegistrationCode(account) : void changeUser(account.id, { active: !account.active })}>{account.registration_pending ? "Reissue code" : account.active ? "Deactivate" : "Reactivate"}</button></td></tr>)}</tbody></table></div></section></div>}
 {active === "users" && !canAdminUsers && <section className="surface-card"><EmptyState title="Access denied" detail="User administration is restricted to authorized administrators." action="Return to overview" onClick={() => setActive("overview")}/></section>}
 
@@ -844,9 +956,19 @@ export default function WorkforceApp() {
       <div className="card-heading">
         <div>
           <h2>Module Access Control</h2>
-          <p>Super Admin can grant or revoke module access for each role. Changes apply immediately.</p>
+          <p>Super Admin can grant or revoke module access for each role. Add new modules or submodules to build a tree. Changes apply immediately.</p>
         </div>
+        <button className="secondary-button" onClick={() => setShowModuleForm(!showModuleForm)}>{showModuleForm ? "Cancel" : "+ Add module"}</button>
       </div>
+      {showModuleForm && <form className="record-form compact-form" onSubmit={saveModule}>
+        <div className="form-grid two-col">
+          <label>Module key<input required minLength={2} maxLength={60} value={moduleDraft.module_key} onChange={(e) => setModuleDraft({ ...moduleDraft, module_key: e.target.value })} placeholder="e.g. custom-module"/></label>
+          <label>Name<input required minLength={2} maxLength={120} value={moduleDraft.name} onChange={(e) => setModuleDraft({ ...moduleDraft, name: e.target.value })}/></label>
+          <label>Description<input value={moduleDraft.description} onChange={(e) => setModuleDraft({ ...moduleDraft, description: e.target.value })}/></label>
+          <label>Parent module<select value={moduleDraft.parent_id} onChange={(e) => setModuleDraft({ ...moduleDraft, parent_id: e.target.value })}><option value="">Top-level module</option>{modules.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+        </div>
+        <div className="form-actions"><button className="primary-button" disabled={busy}>{busy ? "Creating..." : "Create module"}</button></div>
+      </form>}
       <div className="record-list">
         <table>
           <thead>
@@ -858,42 +980,16 @@ export default function WorkforceApp() {
             </tr>
           </thead>
           <tbody>
-            {modules.map((m) => (
-              <tr key={m.id}>
-                <td><b>{m.name}</b></td>
-                <td><small>{m.description ?? "—"}</small></td>
-                {MODULE_ROLES.map((role) => (
-                  <td key={role}>
-                    <label className="checkbox-label">
-                      <input
-                        type="checkbox"
-                        checked={m.permissions.find((p) => p.role === role)?.granted ?? false}
-                        onChange={(event) => {
-                          setModuleAccessDraft({ ...moduleAccessDraft, [`${m.module_key}:${role}`]: event.target.checked });
-                        }}
-                      />
-                      <span className="checkmark"></span>
-                    </label>
-                  </td>
-                ))}
-                <td>
-                  <button className="secondary-button" disabled={busy} onClick={() => {
-                    const roles: Record<string, boolean> = {};
-                    m.permissions.forEach((p) => {
-                      const draftValue = moduleAccessDraft[`${m.module_key}:${p.role}`];
-                      roles[p.role] = draftValue !== undefined ? draftValue : p.granted;
-                    });
-                    void api<void>(`/api/modules/${m.module_key}/roles`, {
-                      method: "PUT",
-                      body: jsonBody({ roles }),
-                    }).then(() => {
-                      setNotice({ kind: "success", text: `Module access for ${m.name} updated.` });
-                      loadModules();
-                      setModuleAccessDraft({});
-                    }).catch((error) => setNotice({ kind: "error", text: errorMessage(error) }));
-                  }}>Save</button>
-                </td>
-              </tr>
+            {modules.filter((m) => m.parent_id === null).map((parent) => (
+              <ModuleTree
+                key={parent.id}
+                module={parent}
+                modules={modules}
+                moduleAccessDraft={moduleAccessDraft}
+                setModuleAccessDraft={setModuleAccessDraft}
+                busy={busy}
+                removeModule={removeModule}
+              />
             ))}
             {modules.length === 0 && (
               <tr>
@@ -969,7 +1065,7 @@ export default function WorkforceApp() {
         </div>
       </article>)}
     </div>}
-    {canAdminPayroll && <button className="primary-button" onClick={() => { setShowRequisitionForm(true); setRequisitionDraft({ title: "", department: "", employment_type: "Permanent" }); }}>Create requisition</button>}
+    {canManageRecruitment && <button className="primary-button" onClick={() => { setShowRequisitionForm(true); setRequisitionDraft({ title: "", department: "", employment_type: "Permanent" }); }}>Create requisition</button>}
   </section>
   {showRequisitionForm && <section className="surface-card">
     <div className="card-heading"><div><h2>Create requisition</h2><p>Define a new open position.</p></div></div>
@@ -998,6 +1094,18 @@ export default function WorkforceApp() {
         <div><small>Applied {new Date(cand.applied_at).toLocaleDateString()}</small></div>
       </article>)}
     </div>}
+    <div className="record-form small-form">
+      <b>Add candidate</b>
+      <form className="record-form compact-form" onSubmit={saveCandidate}>
+        <div className="form-grid two-col">
+          <label>Requisition<select value={candidateDraft.requisition_id} onChange={(e) => setCandidateDraft({ ...candidateDraft, requisition_id: e.target.value })}><option value="">Select requisition</option>{requisitions.map((r) => <option key={r.id} value={r.id}>{r.title} · {r.department ?? "—"}</option>)}</select></label>
+          <label>Full name<input required minLength={2} maxLength={100} value={candidateDraft.name} onChange={(e) => setCandidateDraft({ ...candidateDraft, name: e.target.value })}/></label>
+          <label>Email<input required type="email" maxLength={254} value={candidateDraft.email} onChange={(e) => setCandidateDraft({ ...candidateDraft, email: e.target.value })}/></label>
+          <label>Phone<input maxLength={50} value={candidateDraft.phone} onChange={(e) => setCandidateDraft({ ...candidateDraft, phone: e.target.value })}/></label>
+        </div>
+        <div className="form-actions"><button className="primary-button" disabled={busy}>{busy ? "Adding..." : "Add candidate"}</button> <button type="button" className="secondary-button" onClick={() => setShowCandidateForm(false)}>Cancel</button></div>
+      </form>
+    </div>
   </section></div>}
 
 {active === "performance" && <div className="payroll-layout">

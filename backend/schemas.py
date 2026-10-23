@@ -482,8 +482,23 @@ class ModuleResponse(BaseModel):
     module_key: str
     name: str
     description: str | None
+    parent_id: int | None = None
     active: bool
     created_at: datetime
+
+
+class ModuleCreate(StrictRequest):
+    module_key: str = Field(min_length=2, max_length=60, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    parent_id: int | None = None
+
+
+class ModuleUpdate(StrictRequest):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    active: bool | None = None
+    parent_id: int | None = None
 
 
 class RoleModulePermissionResponse(BaseModel):

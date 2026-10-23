@@ -72,6 +72,7 @@ function isPublicAuthPath(path: string): boolean {
     "/api/auth/login", "/api/login", "/api/auth/register", "/api/register",
     "/api/auth/register-admin", "/api/auth/register-invited", "/api/auth/activate",
     "/api/auth/refresh",
+    "/api/auth/password/forgot", "/api/auth/password/reset",
   ].includes(path);
 }
 

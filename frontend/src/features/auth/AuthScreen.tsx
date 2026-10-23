@@ -38,9 +38,13 @@ export default function AuthScreen({ onAuthenticated, infoMessage }: {
     const form = new FormData(event.currentTarget);
     const roleInvitation = authMode === "register" && registerRole !== "Employee";
     const body: Record<string, unknown> = {
-      ...(authMode !== "invited" && authMode !== "forgot" && authMode !== "reset" && authMode !== "mfa" && !roleInvitation
+      ...(authMode !== "invited" && authMode !== "reset" && authMode !== "mfa" && !roleInvitation
         ? { email: String(form.get("email") ?? "") } : {}),
-      password: String(form.get("password") ?? ""),
+      ...(authMode === "reset"
+        ? { new_password: String(form.get("password") ?? "") }
+        : authMode !== "forgot"
+          ? { password: String(form.get("password") ?? "") }
+          : {}),
       ...((authMode === "admin" || (authMode === "register" && !roleInvitation)) ? { name: String(form.get("name") ?? "") } : {}),
       ...(authMode === "admin" ? { setup_token: String(form.get("setup_token") ?? "") } : {}),
       ...((authMode === "invited" || roleInvitation) ? { invitation_token: String(form.get("invitation_token") ?? "") } : {}),
